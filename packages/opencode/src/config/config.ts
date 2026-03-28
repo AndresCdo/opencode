@@ -144,7 +144,7 @@ export namespace Config {
         cwd: dir,
         abort: input?.signal,
       },
-    ).catch((err) => {
+    ).catch((err: unknown) => {
       if (err instanceof Process.RunFailedError) {
         const detail = {
           dir,
