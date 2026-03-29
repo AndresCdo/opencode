@@ -12,28 +12,64 @@ import { Log } from "../../util/log"
 import { lazy } from "../../util/lazy"
 import { Config } from "../../config/config"
 import { errors } from "../error"
+import { Flag } from "@/flag/flag"
 
 const log = Log.create({ service: "server" })
 
 export const GlobalDisposedEvent = BusEvent.define("global.disposed", z.object({}))
 
-async function streamEvents(c: Context, subscribe: (q: AsyncQueue<string | null>) => () => void) {
-  return streamSSE(c, async (stream) => {
-    const q = new AsyncQueue<string | null>()
-    let done = false
+function max() {
+  return Flag.OPENCODE_EXPERIMENTAL_EVENT_QUEUE_MAX ?? 1000
+}
 
-    q.push(
+function parse(input?: string) {
+  if (!input) return
+  const value = Number(input)
+  if (!Number.isSafeInteger(value)) return
+  if (value < 0) return
+  return value
+}
+
+async function streamEvents(c: Context, subscribe: (push: (data: string) => void) => () => void) {
+  return streamSSE(c, async (stream) => {
+    const limit = max()
+    const q = new AsyncQueue<string | null>({ max: limit })
+    let done = false
+    let dropped = 0
+
+    function push(data: string, input?: { force?: boolean }) {
+      if (q.push(data, input)) return
+      dropped++
+      q.clear()
+      q.push(
+        JSON.stringify({
+          payload: {
+            type: BusEvent.StreamLagged.type,
+            properties: {
+              limit,
+              queued: q.size(),
+              dropped,
+            },
+          },
+        }),
+        { force: true },
+      )
+      q.push(null, { force: true })
+    }
+
+    push(
       JSON.stringify({
         payload: {
           type: "server.connected",
           properties: {},
         },
       }),
+      { force: true },
     )
 
     // Send heartbeat every 10s to prevent stalled proxy streams.
     const heartbeat = setInterval(() => {
-      q.push(
+      push(
         JSON.stringify({
           payload: {
             type: "server.heartbeat",
@@ -48,11 +84,11 @@ async function streamEvents(c: Context, subscribe: (q: AsyncQueue<string | null>
       done = true
       clearInterval(heartbeat)
       unsub()
-      q.push(null)
+      q.push(null, { force: true })
       log.info("global event disconnected")
     }
 
-    const unsub = subscribe(q)
+    const unsub = subscribe((data) => push(data))
 
     stream.onAbort(stop)
 
@@ -117,14 +153,41 @@ export const GlobalRoutes = lazy(() =>
         },
       }),
       async (c) => {
+        const raw = c.req.query("after_seq")
+        const after = parse(raw ?? undefined)
         log.info("global event connected")
         c.header("Cache-Control", "no-cache, no-transform")
         c.header("X-Accel-Buffering", "no")
         c.header("X-Content-Type-Options", "nosniff")
 
+        if (raw !== undefined) {
+          return streamSSE(c, async (stream) => {
+            await stream.writeSSE({
+              data: JSON.stringify({
+                payload: {
+                  type: "server.connected",
+                  properties: {},
+                },
+              }),
+            })
+            await stream.writeSSE({
+              data: JSON.stringify({
+                payload: {
+                  type: BusEvent.StreamExpired.type,
+                  properties: {
+                    next: after ?? -1,
+                    oldest: 0,
+                    latest: 0,
+                  },
+                },
+              }),
+            })
+          })
+        }
+
         return streamEvents(c, (q) => {
           async function handler(event: any) {
-            q.push(JSON.stringify(event))
+            q(JSON.stringify(event))
           }
           GlobalBus.on("event", handler)
           return () => GlobalBus.off("event", handler)
@@ -165,7 +228,7 @@ export const GlobalRoutes = lazy(() =>
           return SyncEvent.subscribeAll(({ def, event }) => {
             // TODO: don't pass def, just pass the type (and it should
             // be versioned)
-            q.push(
+            q(
               JSON.stringify({
                 payload: {
                   ...event,
