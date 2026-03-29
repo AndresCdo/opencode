@@ -91,3 +91,37 @@ describe("server /global/event", () => {
     }
   })
 })
+
+describe("server /global/sync-event", () => {
+  test("returns stream.expired for replay request", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const app = Server.Default()
+        const res = await app.request("/global/sync-event?after_seq=0")
+        expect(res.status).toBe(200)
+        const body = await res.text()
+        expect(body).toContain("server.connected")
+        expect(body).toContain("server.stream.expired")
+        expect(body.indexOf("server.connected")).toBeLessThan(body.indexOf("server.stream.expired"))
+      },
+    })
+  })
+
+  test("returns stream.expired for malformed replay cursor", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const app = Server.Default()
+        const res = await app.request("/global/sync-event?after_seq=bad")
+        expect(res.status).toBe(200)
+        const body = await res.text()
+        expect(body).toContain("server.connected")
+        expect(body).toContain("server.stream.expired")
+        expect(body.indexOf("server.connected")).toBeLessThan(body.indexOf("server.stream.expired"))
+      },
+    })
+  })
+})

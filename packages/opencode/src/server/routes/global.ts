@@ -220,10 +220,38 @@ export const GlobalRoutes = lazy(() =>
         },
       }),
       async (c) => {
+        const raw = c.req.query("after_seq")
+        const after = parse(raw ?? undefined)
         log.info("global sync event connected")
         c.header("Cache-Control", "no-cache, no-transform")
         c.header("X-Accel-Buffering", "no")
         c.header("X-Content-Type-Options", "nosniff")
+
+        if (raw !== undefined) {
+          return streamSSE(c, async (stream) => {
+            await stream.writeSSE({
+              data: JSON.stringify({
+                payload: {
+                  type: "server.connected",
+                  properties: {},
+                },
+              }),
+            })
+            await stream.writeSSE({
+              data: JSON.stringify({
+                payload: {
+                  type: BusEvent.StreamExpired.type,
+                  properties: {
+                    next: after ?? -1,
+                    oldest: 0,
+                    latest: 0,
+                  },
+                },
+              }),
+            })
+          })
+        }
+
         return streamEvents(c, (q) => {
           return SyncEvent.subscribeAll(({ def, event }) => {
             // TODO: don't pass def, just pass the type (and it should
